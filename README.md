@@ -6,11 +6,13 @@ A locally hosted web application for batch compositing product images onto backg
 
 - 📤 **Drag & Drop Upload**: Easily upload multiple foreground images at once
 - 🖼️ **Background Selection**: Upload a custom background image for compositing
-- 🔄 **Batch Processing**: Process multiple images sequentially with the Jasper.ai API
+- ⚡ **Parallel Processing**: Process 3 images concurrently for faster batch completion
+- 🔁 **Automatic Retries**: Exponential backoff retry mechanism for resilient API calls
 - 📊 **Real-time Progress**: Track processing status with live updates
 - 📥 **Zip Download**: Download all processed images as a convenient zip file
 - 🎨 **Modern UI**: Beautiful, dark-themed interface with smooth animations
 - 🧹 **Auto-cleanup**: Automatic session cleanup after 1 hour
+- 🧠 **Memory Optimized**: Chunked processing for efficient memory usage with large batches
 
 ## Quick Start
 
@@ -83,7 +85,7 @@ The application uses Jasper.ai's **Packshot Compositing API** to intelligently c
 |----------|--------|-------------|
 | `/api/upload` | POST | Upload foreground images and background |
 | `/api/process` | POST | Start batch image processing |
-| `/api/status` | GET | Get current processing status |
+| `/api/status?sessionId=<id>` | GET | Get processing status for a session |
 | `/api/download/:sessionId` | GET | Download processed images as zip |
 | `/api/clear` | POST | Clear processing results and cleanup session |
 
@@ -95,6 +97,7 @@ The application uses Jasper.ai's **Packshot Compositing API** to intelligently c
 - **Frontend**: Vanilla JavaScript, CSS3
 - **File Handling**: Multer
 - **HTTP Client**: Axios
+- **Concurrency Control**: p-limit (for parallel processing)
 
 ## Configuration
 
@@ -110,6 +113,9 @@ The application uses Jasper.ai's **Packshot Compositing API** to intelligently c
 - Session timeout: 1 hour (auto-cleanup)
 - Max megapixels: 5MP (Jasper API limit)
 - API timeout: 2 minutes per image
+- **Parallel concurrency**: 3 images processed simultaneously
+- **Chunk size**: 10 images per memory chunk
+- **Max retries**: 3 attempts with exponential backoff (4s, 8s, 16s delays)
 
 ## Troubleshooting
 
@@ -123,7 +129,13 @@ JASPER_API_KEY=your_actual_key_here
 Large images are automatically resized to stay under Jasper's 5 megapixel limit. This is handled automatically and logged to the console.
 
 ### Processing takes a long time
-Each image takes up to 2 minutes to process with the Jasper API. For large batches, expect longer wait times.
+Each image takes up to 2 minutes to process with the Jasper API. However, with parallel processing (3 concurrent), large batches are now significantly faster than sequential processing.
+
+### API rate limiting or errors
+The application automatically retries failed API calls up to 3 times with exponential backoff (4s, 8s, 16s delays). This handles temporary network issues, rate limits (429), and server errors (5xx).
+
+### Memory usage with large batches
+Images are processed in chunks of 10 to optimize memory usage. The background image is pre-loaded once per chunk rather than per-image, reducing memory overhead.
 
 ## License
 

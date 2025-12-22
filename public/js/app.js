@@ -318,7 +318,7 @@ class ImageProcessor {
     async pollStatus() {
         const poll = async () => {
             try {
-                const response = await fetch('/api/status');
+                const response = await fetch(`/api/status?sessionId=${this.sessionId}`);
                 const status = await response.json();
 
                 // Update progress

@@ -9,9 +9,16 @@ const sharp = require('sharp');
 const archiver = require('archiver');
 const crypto = require('crypto');
 const FormData = require('form-data');
+const pLimit = require('p-limit').default;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Processing configuration
+const CONCURRENCY_LIMIT = 3;  // Parallel API calls
+const CHUNK_SIZE = 10;        // Images per memory chunk
+const MAX_RETRIES = 3;        // Retry attempts for failed API calls
+const RETRY_BASE_DELAY = 2000; // Base delay for exponential backoff (ms)
 
 // Middleware
 app.use(cors());
@@ -34,6 +41,26 @@ if (!fs.existsSync(tempDir)) {
 const activeSessions = new Map();
 const SESSION_TIMEOUT = 60 * 60 * 1000; // 1 hour
 
+// Per-session processing states (fixes race condition)
+const sessionStates = new Map();
+
+function getSessionState(sessionId) {
+    if (!sessionStates.has(sessionId)) {
+        sessionStates.set(sessionId, {
+            isProcessing: false,
+            totalImages: 0,
+            processedImages: 0,
+            currentImages: [],  // Track multiple concurrent images
+            results: []
+        });
+    }
+    return sessionStates.get(sessionId);
+}
+
+function cleanupSessionState(sessionId) {
+    sessionStates.delete(sessionId);
+}
+
 // Cleanup old sessions periodically
 setInterval(() => {
     const now = Date.now();
@@ -51,10 +78,49 @@ function cleanupSession(sessionId) {
         console.log(`Cleaned up session: ${sessionId}`);
     }
     activeSessions.delete(sessionId);
+    cleanupSessionState(sessionId);
 }
 
 function generateSessionId() {
     return crypto.randomBytes(16).toString('hex');
+}
+
+// Utility: sleep for exponential backoff
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Retry mechanism with exponential backoff
+function isRetryableError(error) {
+    // Retry on network errors, timeouts, rate limits (429), and server errors (5xx)
+    if (!error.response) {
+        // Network error or timeout
+        return true;
+    }
+    const status = error.response.status;
+    return status === 429 || status >= 500;
+}
+
+async function withRetry(fn, context = '', maxRetries = MAX_RETRIES) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            
+            if (!isRetryableError(error) || attempt === maxRetries) {
+                throw error;
+            }
+            
+            const delay = Math.pow(2, attempt) * RETRY_BASE_DELAY; // 4s, 8s, 16s
+            console.log(`[Retry ${attempt}/${maxRetries}] ${context} - Retrying in ${delay}ms...`);
+            await sleep(delay);
+        }
+    }
+    
+    throw lastError;
 }
 
 // Configure multer for file uploads
@@ -89,16 +155,6 @@ const uploadFields = upload.fields([
     { name: 'images', maxCount: 100 },
     { name: 'background', maxCount: 1 }
 ]);
-
-// Store processing state
-let processingState = {
-    isProcessing: false,
-    totalImages: 0,
-    processedImages: 0,
-    currentImage: '',
-    results: [],
-    sessionId: null
-};
 
 // API Routes
 
@@ -171,18 +227,16 @@ app.post('/api/process', async (req, res) => {
         fileCount: files.length
     });
 
-    // Initialize processing state
-    processingState = {
-        isProcessing: true,
-        totalImages: files.length,
-        processedImages: 0,
-        currentImage: '',
-        results: [],
-        sessionId: sessionId
-    };
+    // Initialize per-session processing state
+    const state = getSessionState(sessionId);
+    state.isProcessing = true;
+    state.totalImages = files.length;
+    state.processedImages = 0;
+    state.currentImages = [];
+    state.results = [];
 
     // Process asynchronously with background
-    processImages(files, backgroundFile, backgroundDimensions, sessionDir);
+    processImagesParallel(files, backgroundFile, backgroundDimensions, sessionDir, sessionId);
 
     res.json({
         success: true,
@@ -192,9 +246,27 @@ app.post('/api/process', async (req, res) => {
     });
 });
 
-// Get processing status
+// Get processing status (now requires sessionId)
 app.get('/api/status', (req, res) => {
-    res.json(processingState);
+    const { sessionId } = req.query;
+    
+    if (!sessionId) {
+        // Backwards compatibility: return empty state if no sessionId
+        return res.json({
+            isProcessing: false,
+            totalImages: 0,
+            processedImages: 0,
+            currentImages: [],
+            results: []
+        });
+    }
+    
+    const state = getSessionState(sessionId);
+    res.json({
+        ...state,
+        // For backwards compatibility, include currentImage as string
+        currentImage: state.currentImages.length > 0 ? state.currentImages.join(', ') : ''
+    });
 });
 
 // Download processed images as zip
@@ -303,8 +375,36 @@ async function downscaleImageToLimit(imagePath, maxWidth, maxHeight, maxPixels) 
         .toBuffer();
 }
 
-// Jasper.ai Packshot Compositing API integration
-async function processWithJasper(foregroundPath, backgroundPath, bgDimensions, originalFilename) {
+// Pre-load and cache background buffer for a chunk
+async function loadBackgroundBuffer(backgroundPath, bgDimensions) {
+    const safeMaxPixels = MAX_MEGAPIXELS * 0.9;
+    
+    let finalOutputWidth = bgDimensions.width;
+    let finalOutputHeight = bgDimensions.height;
+    const bgPixels = finalOutputWidth * finalOutputHeight;
+    if (bgPixels > safeMaxPixels) {
+        const scale = Math.sqrt(safeMaxPixels / bgPixels);
+        finalOutputWidth = Math.floor(finalOutputWidth * scale);
+        finalOutputHeight = Math.floor(finalOutputHeight * scale);
+    }
+    
+    const backgroundBuffer = await downscaleImageToLimit(
+        backgroundPath,
+        finalOutputWidth,
+        finalOutputHeight,
+        safeMaxPixels
+    );
+    
+    return {
+        buffer: backgroundBuffer,
+        finalWidth: finalOutputWidth,
+        finalHeight: finalOutputHeight,
+        safeMaxPixels
+    };
+}
+
+// Jasper.ai Packshot Compositing API integration (with pre-loaded background)
+async function processWithJasperOptimized(foregroundPath, backgroundData, originalFilename) {
     const apiKey = process.env.JASPER_API_KEY;
     
     if (!apiKey) {
@@ -315,32 +415,13 @@ async function processWithJasper(foregroundPath, backgroundPath, bgDimensions, o
     }
 
     try {
-        // Calculate max dimensions to stay under 5MP limit with some safety margin
-        const safeMaxPixels = MAX_MEGAPIXELS * 0.9; // 4.5MP for safety margin
-        
-        // First, calculate the final output dimensions (respecting 5MP limit)
-        let finalOutputWidth = bgDimensions.width;
-        let finalOutputHeight = bgDimensions.height;
-        const bgPixels = finalOutputWidth * finalOutputHeight;
-        if (bgPixels > safeMaxPixels) {
-            const scale = Math.sqrt(safeMaxPixels / bgPixels);
-            finalOutputWidth = Math.floor(finalOutputWidth * scale);
-            finalOutputHeight = Math.floor(finalOutputHeight * scale);
-        }
+        const { buffer: backgroundBuffer, finalWidth, finalHeight, safeMaxPixels } = backgroundData;
         
         // Downscale foreground to fit within FINAL output dimensions
         const foregroundBuffer = await downscaleImageToLimit(
             foregroundPath, 
-            finalOutputWidth,
-            finalOutputHeight,
-            safeMaxPixels
-        );
-
-        // Downscale background to the same final output dimensions
-        const backgroundBuffer = await downscaleImageToLimit(
-            backgroundPath,
-            finalOutputWidth,
-            finalOutputHeight,
+            finalWidth,
+            finalHeight,
             safeMaxPixels
         );
 
@@ -355,19 +436,23 @@ async function processWithJasper(foregroundPath, backgroundPath, bgDimensions, o
             contentType: 'image/jpeg'
         });
 
-        // Call Jasper.ai Packshot Compositing API
+        // Call Jasper.ai Packshot Compositing API with retry
         const apiEndpoint = 'https://api.jasper.ai/v1/image/packshot-compositing';
-        const response = await axios.post(
-            apiEndpoint,
-            formData,
-            {
-                headers: {
-                    'x-api-key': apiKey,
-                    ...formData.getHeaders()
-                },
-                timeout: 120000, // 2 minute timeout
-                responseType: 'arraybuffer'  // Receive as binary buffer
-            }
+        
+        const response = await withRetry(
+            () => axios.post(
+                apiEndpoint,
+                formData,
+                {
+                    headers: {
+                        'x-api-key': apiKey,
+                        ...formData.getHeaders()
+                    },
+                    timeout: 120000, // 2 minute timeout
+                    responseType: 'arraybuffer'  // Receive as binary buffer
+                }
+            ),
+            `Processing ${originalFilename}`
         );
 
         // Response is raw JPEG binary data
@@ -402,48 +487,111 @@ async function processWithJasper(foregroundPath, backgroundPath, bgDimensions, o
     }
 }
 
-// Process all images
-async function processImages(files, backgroundFile, bgDimensions, outputDirectory) {
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        processingState.currentImage = file.originalName;
+// Process a single image (used by parallel processor)
+async function processSingleImage(file, backgroundData, outputDirectory, state) {
+    const fileName = file.originalName;
+    
+    // Track this image as being processed
+    state.currentImages.push(fileName);
+    
+    try {
+        // Process with Jasper.ai Packshot Compositing (with retry built-in)
+        const result = await processWithJasperOptimized(file.path, backgroundData, fileName);
 
-        try {
-            // Process with Jasper.ai Packshot Compositing
-            const result = await processWithJasper(file.path, backgroundFile.path, bgDimensions, file.originalName);
-
-            if (!result.success) {
-                throw new Error(result.error || 'Processing failed');
-            }
-
-            // Save the processed image
-            if (result.imageData) {
-                const outputFilename = `composited-${file.originalName}`;
-                const outputPath = path.join(outputDirectory, outputFilename);
-                fs.writeFileSync(outputPath, result.imageData);
-                result.savedTo = outputPath;
-            }
-
-            processingState.results.push({
-                file: file.originalName,
-                success: true,
-                result: { savedTo: result.savedTo }
-            });
-
-        } catch (error) {
-            console.error(`Error processing ${file.originalName}:`, error);
-            processingState.results.push({
-                file: file.originalName,
-                success: false,
-                error: error.message
-            });
+        if (!result.success) {
+            throw new Error(result.error || 'Processing failed');
         }
 
-        processingState.processedImages = i + 1;
+        // Save the processed image
+        if (result.imageData) {
+            const outputFilename = `composited-${fileName}`;
+            const outputPath = path.join(outputDirectory, outputFilename);
+            fs.writeFileSync(outputPath, result.imageData);
+            result.savedTo = outputPath;
+        }
+
+        state.results.push({
+            file: fileName,
+            success: true,
+            result: { savedTo: result.savedTo }
+        });
+
+        console.log(`✓ Processed: ${fileName}`);
+
+    } catch (error) {
+        console.error(`✗ Error processing ${fileName}:`, error.message);
+        state.results.push({
+            file: fileName,
+            success: false,
+            error: error.message
+        });
+    } finally {
+        // Remove from current images being processed
+        const idx = state.currentImages.indexOf(fileName);
+        if (idx > -1) {
+            state.currentImages.splice(idx, 1);
+        }
+        
+        // Increment processed count
+        state.processedImages++;
+    }
+}
+
+// Process all images with parallel execution and chunked memory management
+async function processImagesParallel(files, backgroundFile, bgDimensions, outputDirectory, sessionId) {
+    const state = getSessionState(sessionId);
+    const limit = pLimit(CONCURRENCY_LIMIT);
+    
+    console.log(`\n📦 Starting batch processing: ${files.length} images`);
+    console.log(`   Concurrency: ${CONCURRENCY_LIMIT}, Chunk size: ${CHUNK_SIZE}, Max retries: ${MAX_RETRIES}\n`);
+    
+    // Process in chunks for memory efficiency
+    for (let chunkStart = 0; chunkStart < files.length; chunkStart += CHUNK_SIZE) {
+        const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, files.length);
+        const chunk = files.slice(chunkStart, chunkEnd);
+        const chunkNum = Math.floor(chunkStart / CHUNK_SIZE) + 1;
+        const totalChunks = Math.ceil(files.length / CHUNK_SIZE);
+        
+        console.log(`📂 Processing chunk ${chunkNum}/${totalChunks} (${chunk.length} images)`);
+        
+        // Pre-load background buffer once per chunk (memory optimization)
+        let backgroundData;
+        try {
+            backgroundData = await loadBackgroundBuffer(backgroundFile.path, bgDimensions);
+        } catch (error) {
+            console.error('Failed to load background image:', error);
+            // Mark all images in chunk as failed
+            for (const file of chunk) {
+                state.results.push({
+                    file: file.originalName,
+                    success: false,
+                    error: 'Failed to load background image'
+                });
+                state.processedImages++;
+            }
+            continue;
+        }
+        
+        // Process chunk in parallel with concurrency limit
+        const promises = chunk.map(file => 
+            limit(() => processSingleImage(file, backgroundData, outputDirectory, state))
+        );
+        
+        await Promise.all(promises);
+        
+        // Clear background buffer reference to help GC
+        backgroundData = null;
+        
+        console.log(`   Chunk ${chunkNum} complete. Progress: ${state.processedImages}/${state.totalImages}\n`);
     }
 
-    processingState.isProcessing = false;
-    processingState.currentImage = '';
+    state.isProcessing = false;
+    state.currentImages = [];
+
+    // Summary
+    const successCount = state.results.filter(r => r.success).length;
+    const errorCount = state.results.filter(r => !r.success).length;
+    console.log(`\n✅ Batch complete: ${successCount} successful, ${errorCount} failed\n`);
 
     // Cleanup uploaded files after processing
     const filesToCleanup = [...files, backgroundFile];
@@ -460,19 +608,12 @@ async function processImages(files, backgroundFile, bgDimensions, outputDirector
 
 // Clear results
 app.post('/api/clear', (req, res) => {
-    // Cleanup old session if exists
-    if (processingState.sessionId) {
-        cleanupSession(processingState.sessionId);
+    const { sessionId } = req.body;
+    
+    if (sessionId) {
+        cleanupSession(sessionId);
     }
     
-    processingState = {
-        isProcessing: false,
-        totalImages: 0,
-        processedImages: 0,
-        currentImage: '',
-        results: [],
-        sessionId: null
-    };
     res.json({ success: true });
 });
 
@@ -487,6 +628,9 @@ app.listen(PORT, () => {
 ║   Server running at: http://localhost:${PORT}                 ║
 ║                                                            ║
 ║   Ready to process images!                                 ║
+║   - Parallel processing: ${CONCURRENCY_LIMIT} concurrent                      ║
+║   - Chunk size: ${CHUNK_SIZE} images                                 ║
+║   - Retries: ${MAX_RETRIES} with exponential backoff                   ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
     `);
