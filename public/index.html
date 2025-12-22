@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jasper Image Processor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="noise-overlay"></div>
+    <div class="gradient-orb orb-1"></div>
+    <div class="gradient-orb orb-2"></div>
+    
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="2" y="2" width="36" height="36" rx="8" stroke="currentColor" stroke-width="2"/>
+                        <circle cx="14" cy="14" r="4" fill="currentColor"/>
+                        <path d="M8 32L16 22L22 28L32 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <h1>Jasper<span class="accent">Processor</span></h1>
+            </div>
+            <p class="tagline">Transform your images with AI-powered processing</p>
+        </header>
+
+        <main class="main-content">
+            <!-- Step 1: Upload Images -->
+            <section class="card upload-section" id="uploadSection">
+                <div class="step-indicator">
+                    <span class="step-number">01</span>
+                    <span class="step-label">Select Images</span>
+                </div>
+                
+                <div class="dropzone" id="dropzone">
+                    <div class="dropzone-content">
+                        <div class="dropzone-icon">
+                            <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M32 8V40M32 40L20 28M32 40L44 28" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M8 48V52C8 54.2091 9.79086 56 12 56H52C54.2091 56 56 54.2091 56 52V48" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                            </svg>
+                        </div>
+                        <p class="dropzone-text">Drag & drop images here</p>
+                        <p class="dropzone-subtext">or click to browse</p>
+                        <input type="file" id="fileInput" multiple accept="image/*" hidden>
+                    </div>
+                </div>
+
+                <div class="file-list" id="fileList">
+                    <div class="file-list-header">
+                        <span class="file-count" id="fileCount">0 files selected</span>
+                        <button class="btn btn-ghost" id="clearFiles">Clear All</button>
+                    </div>
+                    <div class="file-items" id="fileItems"></div>
+                </div>
+            </section>
+
+            <!-- Step 2: Select Background Image -->
+            <section class="card background-section" id="backgroundSection">
+                <div class="step-indicator">
+                    <span class="step-number">02</span>
+                    <span class="step-label">Select Background</span>
+                </div>
+                
+                <div class="dropzone dropzone-small" id="bgDropzone">
+                    <div class="dropzone-content">
+                        <div class="dropzone-icon">
+                            <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <rect x="8" y="8" width="48" height="48" rx="4" stroke="currentColor" stroke-width="3"/>
+                                <circle cx="24" cy="24" r="6" fill="currentColor"/>
+                                <path d="M12 52L28 36L38 46L52 30" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <p class="dropzone-text">Drop background image here</p>
+                        <p class="dropzone-subtext">or click to browse</p>
+                        <input type="file" id="bgFileInput" accept="image/*" hidden>
+                    </div>
+                </div>
+
+                <div class="background-preview" id="backgroundPreview">
+                    <div class="bg-preview-image" id="bgPreviewImage"></div>
+                    <div class="bg-preview-info">
+                        <div class="bg-preview-name" id="bgPreviewName"></div>
+                        <div class="bg-preview-dimensions" id="bgPreviewDimensions"></div>
+                        <button class="btn btn-ghost btn-sm" id="clearBackground">Remove</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 3: Process -->
+            <section class="card process-section" id="processSection">
+                <div class="step-indicator">
+                    <span class="step-number">03</span>
+                    <span class="step-label">Process & Download</span>
+                </div>
+
+                <div class="process-controls">
+                    <button class="btn btn-primary btn-large" id="processBtn" disabled>
+                        <span class="btn-text">Start Processing</span>
+                        <span class="btn-icon-right">
+                            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M5 12H19M19 12L12 5M19 12L12 19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </span>
+                    </button>
+                </div>
+
+                <!-- Progress -->
+                <div class="progress-section" id="progressSection">
+                    <div class="progress-header">
+                        <span class="progress-title">Processing Images</span>
+                        <span class="progress-count" id="progressCount">0 / 0</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="current-file" id="currentFile"></div>
+                </div>
+
+                <!-- Results -->
+                <div class="results-section" id="resultsSection">
+                    <div class="results-header">
+                        <h3>Processing Complete</h3>
+                        <div class="results-summary" id="resultsSummary"></div>
+                    </div>
+                    <div class="results-list" id="resultsList"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>Jasper Image Processor &mdash; Local AI-powered image processing</p>
+            <p class="api-status" id="apiStatus">
+                <span class="status-dot pending"></span>
+                Jasper.ai integration pending
+            </p>
+        </footer>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
+
+
