@@ -1,8 +1,25 @@
-require('dotenv').config();
+const { execSync } = require('child_process');
+const path = require('path');
+
+// Self-healing .env loader - automatically fixes macOS extended attribute issues
+const envPath = path.join(__dirname, '.env');
+let dotenvResult = require('dotenv').config();
+
+if (dotenvResult.error?.code === 'EPERM' && require('fs').existsSync(envPath)) {
+    console.log('⚠️  Fixing .env file permissions...');
+    try {
+        execSync(`xattr -c "${envPath}"`);
+        dotenvResult = require('dotenv').config({ override: true });
+        console.log('✓ Fixed! Continuing startup...');
+    } catch (e) {
+        console.error('❌ Could not fix .env permissions. Run manually: xattr -c .env');
+        process.exit(1);
+    }
+}
+
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
-const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 const sharp = require('sharp');

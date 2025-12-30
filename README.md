@@ -13,6 +13,7 @@ A locally hosted web application for batch compositing product images onto backg
 - 🎨 **Modern UI**: Beautiful, dark-themed interface with smooth animations
 - 🧹 **Auto-cleanup**: Automatic session cleanup after 1 hour
 - 🧠 **Memory Optimized**: Chunked processing for efficient memory usage with large batches
+- 🔧 **Self-Healing Config**: Automatically fixes macOS extended attribute issues on `.env` files
 
 ## Quick Start
 
@@ -136,6 +137,12 @@ The application automatically retries failed API calls up to 3 times with expone
 
 ### Memory usage with large batches
 Images are processed in chunks of 10 to optimize memory usage. The background image is pre-loaded once per chunk rather than per-image, reducing memory overhead.
+
+### macOS extended attribute errors (EPERM)
+If your `.env` file was downloaded from the web or copied from an external source, macOS may add extended attributes that prevent it from being read. The application automatically detects and fixes this issue by running `xattr -c .env`. If the automatic fix fails, you can run this command manually:
+```bash
+xattr -c .env
+```
 
 ## License
 
